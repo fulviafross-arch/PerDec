@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local tools and OS
+.vscode/*
+!.vscode/launch.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Unity generated data/builds
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+UserSettings/
+*.unitypackage
+
+# PerfGuardian generated outputs; retain only curated fixtures under tests/
+artifacts/
+reports/
+*.log
+
+# Machine-specific runner configuration (paths may contain personal data)
+perfguardian.local.json

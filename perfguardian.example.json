@@ -1,0 +1,15 @@
+{
+  "exe": "D:\\Builds\\My Game\\Game.exe",
+  "project_id": "MyGame",
+  "experiment_id": "PerfTest",
+  "experiment_version": "001",
+  "scenario_id": "Scene01",
+  "scenario_version": "001",
+  "commit_sha": "replace-with-build-commit",
+  "branch": "main",
+  "warmup_seconds": 1,
+  "measurement_seconds": 5,
+  "sample_interval_ms": 16,
+  "repetitions": 1,
+  "artifacts_root": "D:\\PerDec\\artifacts"
+}
