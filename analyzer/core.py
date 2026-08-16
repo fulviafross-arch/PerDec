@@ -7,7 +7,18 @@ import statistics
 from pathlib import Path
 from typing import Any, Iterable
 
-ANALYSIS_SCHEMA_VERSION = "0.2.0-experimental"
+from .diagnostics import (
+    allocation_diagnostics,
+    build_activity_events,
+    chart_data,
+    detect_incidents,
+    gc_diagnostics,
+    memory_diagnostics,
+    summarize_events,
+)
+from .external_process import attach_process_evidence, load_external_process
+
+ANALYSIS_SCHEMA_VERSION = "0.5.0-experimental"
 SUPPORTED_DATA_SCHEMAS = {"0.1.0-draft"}
 
 BASE_METRICS = (
@@ -253,8 +264,11 @@ def gc_windows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         after = _nearest_value(rows, completion_end, "gc_used_bytes", 1)
         windows.append(
             {
+                "window_index": len(windows),
                 "start_frame_index": _frame_index(rows[start], start),
                 "end_frame_index": _frame_index(rows[end], end),
+                "start_timestamp_ms": rows[start].get("timestamp_ms"),
+                "end_timestamp_ms": rows[end].get("timestamp_ms"),
                 "completion_frame_index": _completion_frame(completion_rows, start),
                 "duration_frames": end - start + 1,
                 "marker_total_ms": sum(marker_values),
@@ -418,13 +432,44 @@ def analyze_run(run_dir: Path, runner_report: dict[str, Any] | None = None) -> d
     windows = gc_windows(rows) if "gc_collect_ms" in columns else []
     quality = quality_assessment(rows, columns, collector, metrics)
     frame_values = [row["frame_time_ms"] for row in rows if isinstance(row.get("frame_time_ms"), (int, float))]
+    quality_flags = quality["quality_flags"]
+    performance_events, diagnostic_thresholds = detect_incidents(
+        rows, manifest, windows, quality_flags
+    )
+    measurement_coverage_ms = rows[-1].get("timestamp_ms") if rows else None
+    external_process_monitor, process_rows = load_external_process(
+        run_dir, runner_report, measurement_coverage_ms
+    )
+    attach_process_evidence(
+        performance_events,
+        process_rows,
+        external_process_monitor.get("availability") == "available",
+    )
+    trends = memory_trends(rows)
+    memory = memory_diagnostics(rows, trends)
+    gc = gc_diagnostics(windows, performance_events)
+    allocations = allocation_diagnostics(rows, quality_flags)
+    build = manifest.get("build") or {}
+    scenario = manifest.get("scenario") or {}
+    environment = manifest.get("environment") or {}
+    traceability_warnings = []
+    if build.get("commit_sha") in (None, "", "abc123", "unknown"):
+        traceability_warnings.append("placeholder_or_missing_commit_sha")
+    activities = build_activity_events(
+        gc["windows"], memory, rows[-1].get("timestamp_ms") if rows else None
+    )
+    events = performance_events + activities
+    diagnostic_summary = summarize_events(
+        events, gc["window_count"], memory["status"], len(rows), quality
+    )
     return {
+        "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
         "run_id": manifest.get("run_id"),
         "artifact_directory": str(run_dir),
         "runner_eligible_for_analysis": runner_report.get("eligible_for_analysis") if runner_report else None,
         "analysis_eligible": quality["status"] == "valid",
         "frame_count": len(rows),
-        "measurement_coverage_ms": rows[-1].get("timestamp_ms") if rows else None,
+        "measurement_coverage_ms": measurement_coverage_ms,
         "columns": columns,
         "collector": {
             "collector_id": collector.get("collector_id"),
@@ -435,13 +480,63 @@ def analyze_run(run_dir: Path, runner_report: dict[str, Any] | None = None) -> d
             "gc_collection_count_alignment": collector.get("gc_collection_count_alignment"),
         },
         "comparison_key": comparison_key(manifest),
+        "run_summary": {
+            "build_type": build.get("build_type"),
+            "commit_sha": build.get("commit_sha"),
+            "unity_version": build.get("unity_version"),
+            "scenario_id": scenario.get("scenario_id"),
+            "scenario_version": scenario.get("scenario_version"),
+            "active_scene": scenario.get("active_scene"),
+            "environment": {
+                "cpu_model": environment.get("cpu_model"),
+                "gpu_model": environment.get("gpu_model"),
+                "display_width_pixels": environment.get("display_width_pixels"),
+                "display_height_pixels": environment.get("display_height_pixels"),
+                "display_refresh_rate_hz": environment.get("display_refresh_rate_hz"),
+                "v_sync_count": environment.get("v_sync_count"),
+                "target_frame_rate": environment.get("target_frame_rate"),
+            },
+            "traceability_warnings": traceability_warnings,
+        },
         "quality": quality,
         "metrics": metrics,
         "gc_windows": windows,
-        "memory_trends": memory_trends(rows),
+        "memory_trends": trends,
         "anomaly_threshold": {"method": "p99", "frame_time_ms": percentile(frame_values, 0.99)},
         "anomaly_frames": anomaly_evidence(rows, manifest, windows),
+        "diagnostic_thresholds": diagnostic_thresholds,
+        "diagnostic_summary": diagnostic_summary,
+        "events": events,
+        "gc_diagnostics": gc,
+        "allocation_diagnostics": allocations,
+        "memory_diagnostics": memory,
+        "external_process_monitor": external_process_monitor,
+        "chart_data": chart_data(rows, events),
+        "source_artifacts": {
+            "run_json": str(run_dir / "run.json"),
+            "frames_csv": str(run_dir / "frames.csv"),
+            "events_jsonl": str(run_dir / "events.jsonl"),
+            "player_log": str(run_dir / "player.log"),
+            "process_csv": str(run_dir / "process.csv"),
+        },
     }
+
+
+def _overall_conclusion(
+    incidents: list[dict[str, Any]],
+    quality: dict[str, Any],
+    memory: dict[str, Any],
+) -> str:
+    if quality["status"] != "valid":
+        return "Data quality is not fully valid; diagnostic conclusions are limited."
+    if not incidents:
+        return "No frame-time incident exceeded the experimental single-run thresholds."
+    severe = sum(incident["severity"] == "severe" for incident in incidents)
+    major = sum(incident["severity"] == "major" for incident in incidents)
+    conclusion = f"Detected {len(incidents)} frame-time incident(s): {severe} severe, {major} major."
+    if memory["status"] == "insufficient_duration":
+        conclusion += " Memory duration is insufficient for a leak or sustained-growth conclusion."
+    return conclusion
 
 
 def analyze_artifacts(artifacts_root: Path) -> dict[str, Any]:

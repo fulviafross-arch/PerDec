@@ -31,6 +31,8 @@ class RunConfig:
     sample_interval_ms: int = 16
     repetitions: int = 1
     artifacts_root: Path = Path("artifacts")
+    reports_root: Path | None = None
+    external_monitor_interval_ms: int = 100
 
 
 @dataclass
@@ -145,22 +147,160 @@ def run_once(config: RunConfig, repetition: int) -> dict[str, Any]:
     command, started = command_for(config, run_id, run_dir, repetition), utc_now()
     start_clock, timed_out, exit_code = time.monotonic(), False, None
     process = subprocess.Popen(command)
+    monitor = None
+    monitor_report: dict[str, Any] = {
+        "status": "unavailable",
+        "availability": "unavailable",
+        "sample_interval_ms": config.external_monitor_interval_ms,
+        "sample_count": 0,
+        "coverage_ms": None,
+        "warnings": [],
+    }
+    try:
+        from .external_monitor import ExternalProcessMonitor
+
+        monitor = ExternalProcessMonitor(
+            pid=process.pid,
+            output_path=run_dir / "process.csv",
+            sample_interval_ms=config.external_monitor_interval_ms,
+            run_clock_origin=start_clock,
+        )
+        monitor.start()
+    except Exception as exc:
+        monitor_report["warnings"].append(
+            f"monitor_start_failed:{type(exc).__name__}:{exc}"
+        )
     timeout = 60 + config.warmup_seconds + config.measurement_seconds
     try: exit_code = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True; process.terminate()
         try: exit_code = process.wait(timeout=5)
         except subprocess.TimeoutExpired: process.kill(); exit_code = process.wait()
+    finally:
+        if monitor is not None:
+            monitor_report = monitor.stop()
+            monitor_report["availability"] = (
+                "available" if monitor_report.get("sample_count", 0) else "unavailable"
+            )
+            alignment = align_process_timestamps(
+                run_dir / "process.csv", run_dir / "events.jsonl", started
+            )
+            monitor_report["timestamp_alignment"] = alignment
+            monitor_report["warnings"].extend(alignment.get("warnings") or [])
     validation = validate_artifacts(run_dir, run_id, config.measurement_seconds)
     status = "timeout" if timed_out else ("completed" if exit_code == 0 and validation.eligible else "invalid_artifacts")
+    configuration = asdict(config) | {
+        "exe": str(config.exe),
+        "artifacts_root": str(config.artifacts_root),
+        "reports_root": str(config.reports_root) if config.reports_root else None,
+    }
     report = {"runner_status": status, "run_id": run_id, "exe": str(config.exe), "command": command,
               "exit_code": exit_code, "started_at": started, "completed_at": utc_now(),
               "duration_seconds": time.monotonic()-start_clock, "timed_out": timed_out,
-              "configuration": asdict(config) | {"exe": str(config.exe), "artifacts_root": str(config.artifacts_root)},
+              "configuration": configuration,
               "artifact_directory": str(run_dir), "eligible_for_analysis": status == "completed",
               "eligibility_reasons": validation.reasons, "quality_warnings": validation.warnings,
               "sample_count": validation.sample_count, "measurement_coverage_ms": validation.coverage_ms,
-              "metrics": validation.metrics, "log_errors": validation.log_errors}
+              "metrics": validation.metrics, "log_errors": validation.log_errors,
+              "external_process_monitor": monitor_report}
+    if report["eligible_for_analysis"]:
+        reports_root = config.reports_root or (config.artifacts_root.parent / "reports")
+        report["automatic_analysis"] = _generate_analysis(
+            run_dir, report, reports_root
+        )
+    else:
+        report["automatic_analysis"] = {
+            "status": "not_run",
+            "reason": "runner_ineligible",
+        }
     (run_dir / "runner-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "runner-report.html").write_text("<html><body><pre>" + json.dumps(report, ensure_ascii=False, indent=2) + "</pre></body></html>", encoding="utf-8")
     return report
+
+
+def align_process_timestamps(
+    process_csv: Path, events_jsonl: Path, runner_clock_started_at: str
+) -> dict[str, Any]:
+    """Shift Runner-relative samples onto Unity's measurement-relative timeline."""
+    result: dict[str, Any] = {
+        "status": "unavailable",
+        "strategy": "measurement_started.recorded_at minus Runner monotonic/wall-clock anchor",
+        "process_timestamp_origin": "Runner clock immediately before Popen",
+        "unity_timestamp_origin": "Unity measurement_started event",
+        "offset_ms": None,
+        "warnings": [],
+    }
+    if not process_csv.is_file() or not events_jsonl.is_file():
+        result["warnings"].append("timestamp_alignment_inputs_missing")
+        return result
+    try:
+        measurement_started_at = None
+        for line in events_jsonl.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("event_type") == "measurement_started":
+                measurement_started_at = event.get("recorded_at")
+                break
+        if not measurement_started_at:
+            result["warnings"].append("measurement_started_event_missing")
+            return result
+        runner_start = _parse_utc(runner_clock_started_at)
+        unity_start = _parse_utc(measurement_started_at)
+        offset_ms = (unity_start - runner_start).total_seconds() * 1000.0
+        with process_csv.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        if "timestamp_ms" not in fieldnames:
+            result["warnings"].append("process_timestamp_column_missing")
+            return result
+        for row in rows:
+            value = _number(row.get("timestamp_ms"))
+            row["timestamp_ms"] = "" if value is None else f"{value - offset_ms:.3f}"
+        with process_csv.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader(); writer.writerows(rows)
+        result.update({"status": "aligned", "offset_ms": offset_ms})
+        return result
+    except (OSError, ValueError, json.JSONDecodeError, csv.Error) as exc:
+        result["warnings"].append(f"timestamp_alignment_failed:{type(exc).__name__}:{exc}")
+        return result
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _generate_analysis(
+    run_dir: Path,
+    runner_report: dict[str, Any],
+    reports_root: Path,
+) -> dict[str, Any]:
+    try:
+        from analyzer.core import analyze_run
+        from analyzer.report import write_single_run_report
+
+        analysis = analyze_run(run_dir, runner_report)
+        selection = {
+            "mode": "runner_automatic",
+            "selected_run_id": runner_report["run_id"],
+            "rule": "the eligible run that just completed in this Runner process",
+        }
+        json_path, html_path, _ = write_single_run_report(
+            analysis, reports_root, selection
+        )
+        return {
+            "status": "completed",
+            "analysis_json": str(json_path),
+            "analysis_html": str(html_path),
+        }
+    except Exception as exc:  # Analyzer failure must not alter Unity/Runner eligibility.
+        return {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }

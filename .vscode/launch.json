@@ -9,6 +9,41 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true
+    },
+    {
+      "name": "PerfGuardian：分析最新合格运行",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "analyzer",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--artifacts-root", "artifacts",
+        "--output-dir", "reports",
+        "--latest"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "PerfGuardian：按 Run ID 分析",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "analyzer",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--artifacts-root", "artifacts",
+        "--output-dir", "reports",
+        "--run-id", "${input:perfguardianRunId}"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "perfguardianRunId",
+      "type": "promptString",
+      "description": "要分析的 eligible run_id"
     }
   ]
 }

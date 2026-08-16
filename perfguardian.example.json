@@ -10,6 +10,8 @@
   "warmup_seconds": 1,
   "measurement_seconds": 5,
   "sample_interval_ms": 16,
+  "external_monitor_interval_ms": 100,
   "repetitions": 1,
-  "artifacts_root": "D:\\PerDec\\artifacts"
+  "artifacts_root": "D:\\PerDec\\artifacts",
+  "reports_root": "D:\\PerDec\\reports"
 }

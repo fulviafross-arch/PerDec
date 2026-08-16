@@ -22,3 +22,8 @@ frame run IDs match the directory run ID and timestamps are non-decreasing.
 
 Contract changes require rationale, producer/consumer impacts, migration,
 compatibility period, and acceptance tests before implementation.
+
+Runner may additionally produce the optional PoC artifact `process.csv`. It is
+not a fifth Unity eligibility requirement and does not change protocol
+`0.1.0-draft`; its separate additive contract is documented in
+`docs/external-process-telemetry-contract.md`.

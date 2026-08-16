@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-interval-ms", type=int)
     parser.add_argument("--repetitions", type=int)
     parser.add_argument("--artifacts-root", type=Path)
+    parser.add_argument("--reports-root", type=Path)
+    parser.add_argument("--external-monitor-interval-ms", type=int)
     return parser
 
 
@@ -94,8 +96,11 @@ def config_from_args(arguments: list[str] | None = None) -> RunConfig:
     values.setdefault("sample_interval_ms", 16)
     values.setdefault("repetitions", 1)
     values.setdefault("artifacts_root", str(PROJECT_ROOT / "artifacts"))
+    values.setdefault("reports_root", str(PROJECT_ROOT / "reports"))
+    values.setdefault("external_monitor_interval_ms", 100)
     values["exe"] = Path(values["exe"])
     values["artifacts_root"] = Path(values["artifacts_root"])
+    values["reports_root"] = Path(values["reports_root"])
     return RunConfig(**values)
 
 
@@ -105,6 +110,8 @@ def main(arguments: list[str] | None = None) -> int:
         build_parser().error(f"Unity executable not found: {config.exe}")
     if config.repetitions < 1:
         build_parser().error("repetitions must be at least 1")
+    if config.external_monitor_interval_ms < 1:
+        build_parser().error("external-monitor-interval-ms must be at least 1")
     reports = [run_once(config, index) for index in range(1, config.repetitions + 1)]
     print(json.dumps(reports, ensure_ascii=False, indent=2))
     return 0 if all(report["eligible_for_analysis"] for report in reports) else 1
